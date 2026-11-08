@@ -1,0 +1,198 @@
+
+name: Update Lodge V Organization Stats
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update-stats:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Update organization statistics
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.LODGE_STATS_TOKEN }}
+          script: |
+            const org = "Lodge-V";
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const { data: repos } = await github.rest.repos.listForOrg({
+              org,
+              type: "all",
+              per_page: 100
+            });
+
+            const { data: members } = await github.rest.orgs.listMembers({
+              org,
+              per_page: 100
+            });
+
+            const { data: commits } = await github.rest.search.commits({
+              q: `org:${org}`,
+              per_page: 1
+            });
+
+            const now = new Date();
+            const fromDate = new Date(now);
+            fromDate.setUTCDate(fromDate.getUTCDate() - 365);
+
+            const from = fromDate.toISOString();
+            const to = now.toISOString();
+
+            async function getStreak(login) {
+              const result = await github.graphql(`
+                query($login: String!, $from: DateTime!, $to: DateTime!) {
+                  user(login: $login) {
+                    contributionsCollection(from: $from, to: $to) {
+                      contributionCalendar {
+                        totalContributions
+                        weeks {
+                          contributionDays {
+                            date
+                            contributionCount
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `, { login, from, to });
+
+              const calendar =
+                result.user.contributionsCollection.contributionCalendar;
+
+              const days = calendar.weeks
+                .flatMap(w => w.contributionDays)
+                .sort((a, b) => a.date.localeCompare(b.date));
+
+              let longest = 0;
+              let run = 0;
+
+              for (const day of days) {
+                if (day.contributionCount > 0) {
+                  run++;
+                  longest = Math.max(longest, run);
+                } else {
+                  run = 0;
+                }
+              }
+
+              let current = 0;
+              const today = new Date().toISOString().slice(0, 10);
+              const yesterdayDate = new Date();
+              yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
+              const yesterday = yesterdayDate.toISOString().slice(0, 10);
+
+              let i = days.length - 1;
+
+              if (days[i]?.date === today &&
+                  days[i].contributionCount === 0) {
+                i--;
+              }
+
+              if (days[i]?.date !== today &&
+                  days[i]?.date !== yesterday) {
+                return {
+                  current: 0,
+                  longest,
+                  total: calendar.totalContributions
+                };
+              }
+
+              for (; i >= 0 && days[i].contributionCount > 0; i--) {
+                current++;
+              }
+
+              return {
+                current,
+                longest,
+                total: calendar.totalContributions
+              };
+            }
+
+            const rows = [];
+
+            for (const member of members) {
+              try {
+                const stats = await getStreak(member.login);
+
+                rows.push({
+                  login: member.login,
+                  ...stats
+                });
+              } catch (error) {
+                core.warning(
+                  `Could not load ${member.login}: ${error.message}`
+                );
+              }
+            }
+
+            rows.sort((a, b) =>
+              b.current - a.current || b.total - a.total
+            );
+
+            const table = [
+              "| Entwickler | Aktuelle Streak | Längste Streak | Beiträge (365 Tage) |",
+              "|---|---:|---:|---:|",
+              ...rows.map(r =>
+                `| [@${r.login}](https://github.com/${r.login}) | 🔥 ${r.current} Tage | ${r.longest} Tage | ${r.total} |`
+              )
+            ].join("\n");
+
+            const updated =
+              new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
+
+            const stats = [
+              "<!-- LODGE_STATS_START -->",
+              "## 📊 Live Organization Statistics",
+              "",
+              `- **Repositories:** ${repos.length}`,
+              `- **Commits (GitHub search index):** ${commits.total_count}`,
+              `- **Organization members:** ${members.length}`,
+              `- **Last update:** ${updated}`,
+              "",
+              "### 🔥 Developer GitHub Streaks",
+              "",
+              "> Streaks and contributions represent each developer's account-wide GitHub activity, not only Lodge V contributions.",
+              "",
+              table,
+              "",
+              "<!-- LODGE_STATS_END -->"
+            ].join("\n");
+
+            const { data: file } = await github.rest.repos.getContent({
+              owner,
+              repo,
+              path: "profile/README.md"
+            });
+
+            const content = Buffer.from(file.content, "base64").toString("utf8");
+
+            const start = content.indexOf("<!-- LODGE_STATS_START -->");
+            const end = content.indexOf("<!-- LODGE_STATS_END -->");
+
+            if (start === -1 || end === -1 || end < start) {
+              core.setFailed("Statistics markers missing in README.md");
+              return;
+            }
+
+            const next =
+              content.slice(0, start) +
+              stats +
+              content.slice(end + "<!-- LODGE_STATS_END -->".length);
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner,
+              repo,
+              path: "profile/README.md",
+              message: "chore: update Lodge V organization statistics",
+              sha: file.sha,
+              content: Buffer.from(next).toString("base64")
+            });
