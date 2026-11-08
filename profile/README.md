@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/PROJECT-LODGE%20V-FF8C00?style=for-the-badge&logo=github"/>
   <img src="https://img.shields.io/badge/DEVELOPMENT-ACTIVE-22C55E?style=for-the-badge"/>
   <img src="https://img.shields.io/badge/COMMUNITY-GERMAN-111827?style=for-the-badge"/>
-</p>---
+</p>
 
 📊 Organization Statistics
 
@@ -18,7 +18,9 @@
   <a href="https://github.com/orgs/Lodge-V/repositories">📦 Repositories</a> •
   <a href="https://github.com/orgs/Lodge-V/people">👥 Developers</a> •
   <a href="https://github.com/orgs/Lodge-V/activity">📈 Activity</a>
-</p>---
+</p>
+
+
 
 👨‍💻 Developer Team
 
@@ -36,7 +38,7 @@ Every contribution matters.
   <a href="https://github.com/orgs/Lodge-V/people">
     <img src="https://img.shields.io/badge/MEET%20OUR%20TEAM-FF8C00?style=for-the-badge&logo=github&logoColor=white"/>
   </a>
-</p>---
+</p>
 
 🛠️ Technologies & Tools
 
@@ -63,7 +65,9 @@ Every contribution matters.
 
 "Explore all repositories →" (https://github.com/orgs/Lodge-V/repositories)
 
----
+<!-- LODGE_STATS_START -->
+_Statistiken werden beim ersten Workflow-Lauf geladen._
+<!-- LODGE_STATS_END -->
 
 🎯 Development Focus
 
