@@ -23,32 +23,59 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
-            const { data: repos } = await github.rest.repos.listForOrg({
-              org,
-              type: "all",
-              per_page: 100
-            });
+            // Get all organization repositories
+            const repos = await github.paginate(
+              github.rest.repos.listForOrg,
+              {
+                org,
+                type: "all",
+                per_page: 100
+              }
+            );
 
-            const { data: members } = await github.rest.orgs.listMembers({
-              org,
-              per_page: 100
-            });
+            // Get organization members
+            const members = await github.paginate(
+              github.rest.orgs.listMembers,
+              {
+                org,
+                filter: "all",
+                per_page: 100
+              }
+            );
 
-            const { data: commits } = await github.rest.search.commits({
-  q: `initial org:${org}`,
-  per_page: 1
-});
+            // Calculate commits from the last 365 days
+            const sinceDate = new Date();
+            sinceDate.setUTCDate(sinceDate.getUTCDate() - 365);
 
-            const now = new Date();
-            const fromDate = new Date(now);
-            fromDate.setUTCDate(fromDate.getUTCDate() - 365);
+            const since = sinceDate.toISOString();
 
-            const from = fromDate.toISOString();
-            const to = now.toISOString();
+            let totalCommits = 0;
 
-            async function getStreak(login) {
-              const result = await github.graphql(`
-                query($login: String!, $from: DateTime!, $to: DateTime!) {
+            for (const repository of repos) {
+              try {
+                const commits = await github.paginate(
+                  github.rest.repos.listCommits,
+                  {
+                    owner: org,
+                    repo: repository.name,
+                    since,
+                    per_page: 100
+                  }
+                );
+
+                totalCommits += commits.length;
+
+              } catch (error) {
+                core.warning(
+                  `Could not count commits in ${repository.name}: ${error.message}`
+                );
+              }
+            }
+
+            // Get developer contribution statistics
+            async function getContributionStats(login) {
+              const result = await github.graphql(
+                `query($login: String!, $from: DateTime!, $to: DateTime!) {
                   user(login: $login) {
                     contributionsCollection(from: $from, to: $to) {
                       contributionCalendar {
@@ -62,14 +89,19 @@ jobs:
                       }
                     }
                   }
+                }`,
+                {
+                  login,
+                  from: since,
+                  to: new Date().toISOString()
                 }
-              `, { login, from, to });
+              );
 
               const calendar =
                 result.user.contributionsCollection.contributionCalendar;
 
               const days = calendar.weeks
-                .flatMap(w => w.contributionDays)
+                .flatMap(week => week.contributionDays)
                 .sort((a, b) => a.date.localeCompare(b.date));
 
               let longest = 0;
@@ -84,30 +116,41 @@ jobs:
                 }
               }
 
-              let current = 0;
-              const today = new Date().toISOString().slice(0, 10);
+              const today = new Date()
+                .toISOString()
+                .slice(0, 10);
+
               const yesterdayDate = new Date();
-              yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
-              const yesterday = yesterdayDate.toISOString().slice(0, 10);
+              yesterdayDate.setUTCDate(
+                yesterdayDate.getUTCDate() - 1
+              );
 
-              let i = days.length - 1;
+              const yesterday = yesterdayDate
+                .toISOString()
+                .slice(0, 10);
 
-              if (days[i]?.date === today &&
-                  days[i].contributionCount === 0) {
-                i--;
+              let index = days.length - 1;
+
+              if (
+                days[index]?.date === today &&
+                days[index].contributionCount === 0
+              ) {
+                index--;
               }
 
-              if (days[i]?.date !== today &&
-                  days[i]?.date !== yesterday) {
-                return {
-                  current: 0,
-                  longest,
-                  total: calendar.totalContributions
-                };
-              }
+              let current = 0;
 
-              for (; i >= 0 && days[i].contributionCount > 0; i--) {
-                current++;
+              if (
+                days[index]?.date === today ||
+                days[index]?.date === yesterday
+              ) {
+                while (
+                  index >= 0 &&
+                  days[index].contributionCount > 0
+                ) {
+                  current++;
+                  index--;
+                }
               }
 
               return {
@@ -117,16 +160,20 @@ jobs:
               };
             }
 
-            const rows = [];
+            // Collect all developer statistics
+            const developerStats = [];
 
             for (const member of members) {
               try {
-                const stats = await getStreak(member.login);
+                const stats = await getContributionStats(
+                  member.login
+                );
 
-                rows.push({
+                developerStats.push({
                   login: member.login,
                   ...stats
                 });
+
               } catch (error) {
                 core.warning(
                   `Could not load ${member.login}: ${error.message}`
@@ -134,65 +181,98 @@ jobs:
               }
             }
 
-            rows.sort((a, b) =>
-              b.current - a.current || b.total - a.total
+            // Sort developers by current streak
+            developerStats.sort(
+              (a, b) =>
+                b.current - a.current ||
+                b.total - a.total
             );
 
+            // Generate developer table
             const table = [
-              "| Entwickler | Aktuelle Streak | Längste Streak | Beiträge (365 Tage) |",
+              "| Entwickler | Aktuelle Streak | Längste Streak (365 Tage) | Beiträge (365 Tage) |",
               "|---|---:|---:|---:|",
-              ...rows.map(r =>
-                `| [@${r.login}](https://github.com/${r.login}) | 🔥 ${r.current} Tage | ${r.longest} Tage | ${r.total} |`
+              ...developerStats.map(member =>
+                `| [@${member.login}](https://github.com/${member.login}) | 🔥 ${member.current} Tage | ${member.longest} Tage | ${member.total} |`
               )
             ].join("\n");
 
-            const updated =
-              new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
+            // Generate update timestamp
+            const updated = new Date()
+              .toISOString()
+              .replace("T", " ")
+              .slice(0, 16) + " UTC";
 
-            const stats = [
+            // Build statistics section
+            const statsBlock = [
               "<!-- LODGE_STATS_START -->",
               "## 📊 Live Organization Statistics",
               "",
               `- **Repositories:** ${repos.length}`,
-              `- **Commits (GitHub search index):** ${commits.total_count}`,
+              `- **Commits in the last 365 days:** ${totalCommits}`,
               `- **Organization members:** ${members.length}`,
               `- **Last update:** ${updated}`,
               "",
               "### 🔥 Developer GitHub Streaks",
               "",
-              "> Streaks and contributions represent each developer's account-wide GitHub activity, not only Lodge V contributions.",
+              "> Contribution totals and streaks show each developer's account-wide GitHub activity, not only Lodge V contributions. Private contributions may not be visible.",
               "",
               table,
               "",
               "<!-- LODGE_STATS_END -->"
             ].join("\n");
 
-            const { data: file } = await github.rest.repos.getContent({
-              owner,
-              repo,
-              path: "profile/README.md"
-            });
+            // Fetch README
+            const { data: file } =
+              await github.rest.repos.getContent({
+                owner,
+                repo,
+                path: "profile/README.md"
+              });
 
-            const content = Buffer.from(file.content, "base64").toString("utf8");
+            const original = Buffer
+              .from(file.content, "base64")
+              .toString("utf8");
 
-            const start = content.indexOf("<!-- LODGE_STATS_START -->");
-            const end = content.indexOf("<!-- LODGE_STATS_END -->");
+            const startMarker =
+              "<!-- LODGE_STATS_START -->";
 
-            if (start === -1 || end === -1 || end < start) {
-              core.setFailed("Statistics markers missing in README.md");
-              return;
+            const endMarker =
+              "<!-- LODGE_STATS_END -->";
+
+            const start = original.indexOf(startMarker);
+            const end = original.indexOf(endMarker);
+
+            let next;
+
+            if (
+              start !== -1 &&
+              end !== -1 &&
+              end >= start
+            ) {
+              next =
+                original.slice(0, start) +
+                statsBlock +
+                original.slice(end + endMarker.length);
+
+            } else {
+              next =
+                original.trimEnd() +
+                "\n\n" +
+                statsBlock +
+                "\n";
             }
 
-            const next =
-              content.slice(0, start) +
-              stats +
-              content.slice(end + "<!-- LODGE_STATS_END -->".length);
-
+            // Update README
             await github.rest.repos.createOrUpdateFileContents({
               owner,
               repo,
               path: "profile/README.md",
               message: "chore: update Lodge V organization statistics",
               sha: file.sha,
-              content: Buffer.from(next).toString("base64")
+              content: Buffer
+                .from(next, "utf8")
+                .toString("base64")
             });
+
+            core.info("Lodge V statistics updated successfully.");
